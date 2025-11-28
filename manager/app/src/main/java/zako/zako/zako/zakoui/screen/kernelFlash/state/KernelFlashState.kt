@@ -27,15 +27,26 @@ import java.util.zip.ZipOutputStream
  * @author ShirkNeko
  * @date 2025/5/31.
  */
+enum class LogType {
+    UI,      // 来自 ui_print，展示给用户看的信息
+    STDOUT,  // 普通的标准输出，后台记录
+    STDERR   // 标准错误，后台记录
+}
+
+data class LogEntry(
+    val timestamp: Long = System.currentTimeMillis(),
+    val type: LogType,
+    val content: String
+)
+
 data class FlashState(
     val isFlashing: Boolean = false,
     val isCompleted: Boolean = false,
     val progress: Float = 0f,
     val currentStep: String = "",
-    val logs: List<String> = emptyList(),
+    val logs: List<LogEntry> = emptyList(),
     val error: String = ""
 )
-
 class HorizonKernelState {
     private val _state = MutableStateFlow(FlashState())
     val state: StateFlow<FlashState> = _state.asStateFlow()
@@ -48,9 +59,10 @@ class HorizonKernelState {
         _state.update { it.copy(currentStep = step) }
     }
 
-    fun addLog(log: String) {
+    fun addLog(content: String, type: LogType= LogType.UI) {
         _state.update {
-            it.copy(logs = it.logs + log)
+            val entry = LogEntry(type = type, content = content)
+            it.copy(logs = it.logs + entry)
         }
     }
 
@@ -451,20 +463,14 @@ class HorizonKernelWorker(
     }
 
     private fun flash() {
-        val process = ProcessBuilder("su")
-            .redirectErrorStream(true)
-            .start()
+        val process = ProcessBuilder("su").start()
 
         try {
             process.outputStream.bufferedWriter().use { writer ->
                 writer.write("export POSTINSTALL=${context.filesDir.absolutePath}\n")
-
-                // 写入槽位信息到临时文件
-                slot?.let { selectedSlot ->
-                    writer.write("echo \"$selectedSlot\" > ${context.filesDir.absolutePath}/bootslot\n")
+                slot?.let {
+                    writer.write("echo \"$it\" > ${context.filesDir.absolutePath}/bootslot\n")
                 }
-
-                // 构建刷写命令
                 val flashCommand = buildString {
                     append("sh $binaryPath 3 1 \"$filePath\"")
                     if (slot != null) {
@@ -472,38 +478,45 @@ class HorizonKernelWorker(
                     }
                     append(" && touch ${context.filesDir.absolutePath}/done\n")
                 }
-
                 writer.write(flashCommand)
                 writer.write("exit\n")
                 writer.flush()
             }
 
-            process.inputStream.bufferedReader().use { reader ->
-                reader.lineSequence().forEach { line ->
-                    if (line.startsWith("ui_print")) {
-                        val logMessage = line.removePrefix("ui_print").trim()
-                        state.addLog(logMessage)
-
-                        when {
-                            logMessage.contains("extracting", ignoreCase = true) -> {
-                                state.updateProgress(0.75f)
-                            }
-                            logMessage.contains("installing", ignoreCase = true) -> {
-                                state.updateProgress(0.85f)
-                            }
-                            logMessage.contains("complete", ignoreCase = true) -> {
-                                state.updateProgress(0.95f)
+            runBlocking(Dispatchers.IO) {
+                val stdoutJob = launch {
+                    process.inputStream.bufferedReader().useLines { lines ->
+                        lines.forEach { line ->
+                            if (line.startsWith("ui_print")) {
+                                val logMessage = line.removePrefix("ui_print").trim()
+                                state.addLog(logMessage, LogType.UI)
+                                when {
+                                    logMessage.contains("extracting", ignoreCase = true) -> state.updateProgress(0.75f)
+                                    logMessage.contains("installing", ignoreCase = true) -> state.updateProgress(0.85f)
+                                    logMessage.contains("complete", ignoreCase = true) -> state.updateProgress(0.95f)
+                                }
+                            } else {
+                                state.addLog(line, LogType.STDOUT)
                             }
                         }
                     }
                 }
+
+                val stderrJob = launch {
+                    process.errorStream.bufferedReader().useLines { lines ->
+                        lines.forEach { line ->
+                            state.addLog(line, LogType.STDERR)
+                        }
+                    }
+                }
+                stdoutJob.join()
+                stderrJob.join()
             }
+
+            process.waitFor()
+
         } finally {
             process.destroy()
-        }
-
-        if (!File("${context.filesDir.absolutePath}/done").exists()) {
-            throw IOException(context.getString(R.string.flash_failed_message))
         }
     }
 

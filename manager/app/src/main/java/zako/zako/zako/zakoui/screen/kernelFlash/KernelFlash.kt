@@ -45,6 +45,7 @@ import kotlinx.coroutines.withContext
 import zako.zako.zako.zakoui.screen.kernelFlash.state.FlashState
 import zako.zako.zako.zakoui.screen.kernelFlash.state.HorizonKernelState
 import zako.zako.zako.zakoui.screen.kernelFlash.state.HorizonKernelWorker
+import zako.zako.zako.zakoui.screen.kernelFlash.state.LogType
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.*
@@ -86,9 +87,8 @@ fun KernelFlashScreen(
     val scrollBehavior = TopAppBarDefaults.pinnedScrollBehavior(rememberTopAppBarState())
     val snackBarHost = LocalSnackbarHost.current
     val scope = rememberCoroutineScope()
-    var logText by rememberSaveable { mutableStateOf("") }
     var showFloatAction by rememberSaveable { mutableStateOf(false) }
-    val logContent = rememberSaveable { StringBuilder() }
+
     val horizonKernelState = remember {
         if (KernelFlashStateHolder.currentState != null &&
             KernelFlashStateHolder.currentUri == kernelUri &&
@@ -126,8 +126,36 @@ fun KernelFlashScreen(
         }
     }
 
-    // 开始刷写
+    var currentUiText by rememberSaveable { mutableStateOf("") }
+
+    // 计算显示的日志内容
+    val displayLogText by remember(flashState.logs) {
+        derivedStateOf {
+            flashState.logs
+                .filter { it.type == LogType.UI }
+                .joinToString("\n") { it.content }
+        }
+    }
+
+    // 当日志、错误信息或完成状态变化时，自动重新构建文本
+    LaunchedEffect(displayLogText, flashState.error, flashState.isCompleted) {
+        val sb = StringBuilder(displayLogText)
+
+        if (flashState.error.isNotEmpty()) {
+            sb.append("\n").append(flashState.error).append("\n")
+            KernelFlashStateHolder.isFlashing = false
+        } else if (flashState.isCompleted) {
+            sb.append("\n")
+            sb.append(context.getString(R.string.horizon_flash_complete))
+            sb.append("\n\n\n")
+            showFloatAction = true
+        }
+        currentUiText = sb.toString()
+    }
+
+    // 启动刷写任务
     LaunchedEffect(Unit) {
+        // 只有在未开始、未完成且无错误的情况下才启动
         if (!KernelFlashStateHolder.isFlashing && !flashState.isCompleted && flashState.error.isEmpty()) {
             withContext(Dispatchers.IO) {
                 KernelFlashStateHolder.isFlashing = true
@@ -141,30 +169,6 @@ fun KernelFlashScreen(
                 worker.uri = kernelUri
                 worker.setOnFlashCompleteListener(onFlashComplete)
                 worker.start()
-
-                // 监听日志更新
-                while (flashState.error.isEmpty()) {
-                    if (flashState.logs.isNotEmpty()) {
-                        logText = flashState.logs.joinToString("\n")
-                        logContent.clear()
-                        logContent.append(logText)
-                    }
-                    delay(100)
-                }
-
-                if (flashState.error.isNotEmpty()) {
-                    logText += "\n${flashState.error}\n"
-                    logContent.append("\n${flashState.error}\n")
-                    KernelFlashStateHolder.isFlashing = false
-                }
-            }
-        } else {
-            logText = flashState.logs.joinToString("\n")
-            if (flashState.error.isNotEmpty()) {
-                logText += "\n${flashState.error}\n"
-            } else if (flashState.isCompleted) {
-                logText += "\n${context.getString(R.string.horizon_flash_complete)}\n\n\n"
-                showFloatAction = true
             }
         }
     }
@@ -210,11 +214,19 @@ fun KernelFlashScreen(
                     scope.launch {
                         val format = SimpleDateFormat("yyyy-MM-dd-HH-mm-ss", Locale.getDefault())
                         val date = format.format(Date())
+                        val fullLogForFile = flashState.logs.joinToString("\n") { entry ->
+                            val prefix = when (entry.type) {
+                                LogType.UI -> "[UI] "
+                                LogType.STDOUT -> "[STDOUT] "
+                                LogType.STDERR -> "[STDERR] "
+                            }
+                            "$prefix${entry.content}"
+                        }
                         val file = File(
                             Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
                             "KernelSU_kernel_flash_log_${date}.log"
                         )
-                        file.writeText(logContent.toString())
+                        file.writeText(fullLogForFile)
                         snackBarHost.showSnackbar(logSavedString.format(file.absolutePath))
                     }
                 },
@@ -267,12 +279,12 @@ fun KernelFlashScreen(
                     .weight(1f)
                     .verticalScroll(scrollState)
             ) {
-                LaunchedEffect(logText) {
+                LaunchedEffect(currentUiText) {
                     scrollState.animateScrollTo(scrollState.maxValue)
                 }
                 Text(
                     modifier = Modifier.padding(16.dp),
-                    text = logText,
+                    text = currentUiText,
                     style = MaterialTheme.typography.bodyMedium,
                     fontFamily = FontFamily.Monospace,
                     color = MaterialTheme.colorScheme.onSurface
