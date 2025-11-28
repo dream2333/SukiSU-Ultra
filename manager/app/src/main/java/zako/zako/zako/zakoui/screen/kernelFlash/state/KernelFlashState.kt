@@ -98,7 +98,7 @@ class HorizonKernelWorker(
     private val slot: String? = null,
     private val kpmPatchEnabled: Boolean = false,
     private val kpmUndoPatch: Boolean = false
-) : Thread() {
+) {
     var uri: Uri? = null
     private lateinit var filePath: String
     private lateinit var binaryPath: String
@@ -106,13 +106,12 @@ class HorizonKernelWorker(
 
     private var onFlashComplete: (() -> Unit)? = null
     private var originalSlot: String? = null
-    private var downloaderJob: Job? = null
 
     fun setOnFlashCompleteListener(listener: () -> Unit) {
         onFlashComplete = listener
     }
 
-    override fun run() {
+    suspend fun execute() = withContext(Dispatchers.IO) {
         state.startFlashing()
         state.updateStep(context.getString(R.string.horizon_preparing))
 
@@ -127,7 +126,7 @@ class HorizonKernelWorker(
 
             if (!rootAvailable()) {
                 state.setError(context.getString(R.string.root_required))
-                return
+                return@withContext
             }
 
             state.updateStep(context.getString(R.string.horizon_copying_files))
@@ -136,7 +135,7 @@ class HorizonKernelWorker(
 
             if (!File(filePath).exists()) {
                 state.setError(context.getString(R.string.horizon_copy_failed))
-                return
+                return@withContext
             }
 
             state.updateStep(context.getString(R.string.horizon_extracting_tool))
@@ -205,13 +204,12 @@ class HorizonKernelWorker(
                 runCommand(true, "resetprop ro.boot.slot_suffix $originalSlot")
             }
         } finally {
-            // 取消下载任务并清理
-            downloaderJob?.cancel()
+            // 清理下载器资源
             cleanupDownloader()
         }
     }
 
-    private fun prepareKpmToolsWithDownload() {
+    private suspend fun prepareKpmToolsWithDownload() {
         try {
             File(workDir).mkdirs()
             val downloader = RemoteToolsDownloader(context, workDir)
@@ -236,15 +234,7 @@ class HorizonKernelWorker(
                 }
             }
 
-            val downloadJob = CoroutineScope(Dispatchers.IO).launch {
-                downloader.downloadToolsAsync(progressListener)
-            }
-
-            downloaderJob = downloadJob
-
-            runBlocking {
-                downloadJob.join()
-            }
+            downloader.downloadToolsAsync(progressListener)
 
             val kptoolsPath = "$workDir/kptools"
             val kpimgPath = "$workDir/kpimg"
@@ -462,7 +452,7 @@ class HorizonKernelWorker(
         runCommand(false, "sed -i '/chmod -R 755 tools bin;/i cp -f $toolPath \$AKHOME/tools;' $binaryPath")
     }
 
-    private fun flash() {
+    private suspend fun flash() {
         val process = ProcessBuilder("su").start()
 
         try {
@@ -483,7 +473,7 @@ class HorizonKernelWorker(
                 writer.flush()
             }
 
-            runBlocking(Dispatchers.IO) {
+            coroutineScope {
                 val stdoutJob = launch {
                     process.inputStream.bufferedReader().useLines { lines ->
                         lines.forEach { line ->

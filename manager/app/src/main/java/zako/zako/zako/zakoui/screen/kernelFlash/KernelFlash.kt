@@ -157,19 +157,17 @@ fun KernelFlashScreen(
     LaunchedEffect(Unit) {
         // 只有在未开始、未完成且无错误的情况下才启动
         if (!KernelFlashStateHolder.isFlashing && !flashState.isCompleted && flashState.error.isEmpty()) {
-            withContext(Dispatchers.IO) {
-                KernelFlashStateHolder.isFlashing = true
-                val worker = HorizonKernelWorker(
-                    context = context,
-                    state = horizonKernelState,
-                    slot = selectedSlot,
-                    kpmPatchEnabled = kpmPatchEnabled,
-                    kpmUndoPatch = kpmUndoPatch
-                )
-                worker.uri = kernelUri
-                worker.setOnFlashCompleteListener(onFlashComplete)
-                worker.start()
-            }
+            KernelFlashStateHolder.isFlashing = true
+            val worker = HorizonKernelWorker(
+                context = context,
+                state = horizonKernelState,
+                slot = selectedSlot,
+                kpmPatchEnabled = kpmPatchEnabled,
+                kpmUndoPatch = kpmUndoPatch
+            )
+            worker.uri = kernelUri
+            worker.setOnFlashCompleteListener(onFlashComplete)
+            worker.execute()
         }
     }
 
